@@ -1,0 +1,246 @@
+/**
+ * This is the base config for all builds. It uses env.buildtype to change
+ * the output configuration for different build types.
+ */
+
+var webpack = require('webpack')
+var autoprefixer = require('autoprefixer')
+var join = require('path').join
+var _ = require('lodash')
+var stylelint = require('stylelint')
+var ExtractTextPlugin = require('extract-text-webpack-plugin')
+var postcssImport = require('postcss-import')
+var postcssCustomProperties = require('postcss-custom-properties')
+var postcssCalc = require('postcss-calc')
+var postcssColorFunction = require('postcss-color-function')
+var postcssCustomMedia = require('postcss-custom-media')
+var postcssEsplit = require('postcss-esplit')
+var ReactIntlAggregatePlugin = require('react-intl-aggregate-webpack-plugin')
+var ReactIntlFlattenPlugin = require('react-intl-flatten-webpack-plugin')
+var ManifestPlugin = require('webpack-manifest-plugin')
+
+/* Helper so we can use ternary with undefined to not specify a key */
+function dropUndef (obj) {
+  return _(obj).omitBy(_.isNil).value()
+}
+
+var postCssLoader = {
+  loader: 'postcss-loader',
+  options: {
+    plugins: [
+      postcssImport(),
+      postcssCustomProperties,
+      postcssCalc,
+      postcssColorFunction,
+      postcssCustomMedia,
+      postcssEsplit({
+        quiet: true
+      }),
+
+      autoprefixer({
+        browsers: [
+          'Explorer >= 9',
+          'last 2 Chrome versions',
+          'last 2 Firefox versions',
+          'last 2 Safari versions',
+          'last 2 iOS versions',
+          'Android 4'
+        ]
+      })
+    ]
+  }
+}
+
+/*
+ * To set env on command line:
+ *   webpack --env.buildtype=dev
+ *
+ * To set env in build scripts, just pass it as a normal function argument:
+ *   import createConfig from '../webpack.config'
+ *   const config = createConfig({ buildtype: 'dev' })
+ *
+ * Valid buildtype settings: prod (default), dev.
+ *
+ * More info:
+ *   https://blog.flennik.com/the-fine-art-of-the-webpack-2-config-dc4d19d7f172
+ */
+module.exports = function (env) {
+  var buildtype = env && env.buildtype || 'prod'
+
+  /**
+   * Development build.
+   *
+   * This build is meant to use with webpack-dev-server for hot redeployment. It
+   * should be optimised primarily for in-browser debugging, then for fast
+   * incremental builds.
+   */
+  var dev = buildtype === 'dev'
+
+  /**
+   * Production build config.
+   *
+   * This should be optimised for production performance and a small download.
+   * Builds with this config should fail on any error, including linting errors.
+   */
+  var prod = buildtype === 'prod'
+
+  return dropUndef({
+    entry: dropUndef({
+      'frontend': './app/index'
+    }),
+
+    output: dropUndef({
+      path: join(__dirname, 'dist'),
+      filename: prod ? '[name].[chunkhash:8].cache.js' : '[name].js',
+      chunkFilename: prod ? '[name].[chunkhash:8].cache.js' : '[name].js',
+      // includes comments in the generated code about where the code came from
+      pathinfo: dev,
+      // required for hot module replacement
+      publicPath: dev ? 'http://localhost:8000/' : undefined
+    }),
+    module: {
+      rules: _.compact([
+        /* Checks for errors in syntax, and for problematic and inconsistent
+        * code in all JavaScript files.
+        * Configured in .eslintrc
+        */
+        {
+          test: /\.jsx?$/,
+          exclude: /node_modules/,
+          enforce: 'pre',
+          loader: 'eslint-loader',
+          options: {
+            failOnWarning: !dev,
+            failOnError: !dev
+          }
+        },
+
+        /* Allows use of newer javascript syntax.
+         *  - mainly ES6/ES2015 syntax, and a few ES2016 things
+         *  - configured in .babelrc
+         */
+        {
+          test: /\.jsx?$/,
+          exclude: /node_modules/,
+          include: join(__dirname, 'app'),
+          loader: 'babel-loader',
+          options: {
+            babelrc: true
+          }
+        },
+
+        /* Bundles all the css and allows use of various niceties, including
+         * imports, variables, calculations, and non-prefixed codes.
+         */
+        {
+          test: /\.css$/,
+          use: ExtractTextPlugin.extract({
+            fallback: 'style-loader',
+            use: _.compact([
+              {
+                loader: 'css-loader',
+                options: {
+                  minimize: prod,
+                  importLoaders: 1,
+                }
+              },
+              'csso-loader', postCssLoader
+            ])
+          })
+        },
+
+        /* Bundles bootstrap css into the same bundle as the other css.
+         * TODO look at running through csso, same as other css
+         */
+        {
+          test: /\.less$/,
+          exclude: /node_modules/,
+          use: ExtractTextPlugin.extract({
+            fallback: 'style-loader',
+            use: [
+              {
+                loader: 'postcss-loader',
+                options: {
+                  plugins: [
+                    require('stylelint'),
+                  ]
+                }
+              },
+              postCssLoader,
+              'less-loader'
+            ]
+          })
+        }
+      ])
+    },
+
+    plugins: _.compact([
+      /* Outputs css to a separate file per entry-point.
+         Note the call to .extract above */
+      new ExtractTextPlugin({
+        filename: prod ? '[name].[chunkhash:8].cache.css' : '[name].css',
+        disable: false
+      }),
+      new webpack.NoEmitOnErrorsPlugin(),
+
+      prod
+        ? new webpack.optimize.UglifyJsPlugin({ sourceMap: true })
+        : undefined,
+      prod
+        // Workaround to switch old loaders to minimize mode
+        ? new webpack.LoaderOptionsPlugin({ minimize: true })
+        : undefined,
+
+      new webpack.DefinePlugin({
+        'process.env': {
+          'NODE_ENV': JSON.stringify(
+            dev || 'production')
+        }
+      }),
+
+      prod ? new webpack.HashedModuleIdsPlugin() : undefined,
+
+      // Prepare source strings for translation.
+      // This puts the strings generated by react-intl into a single file.
+      prod
+        ? new ReactIntlAggregatePlugin({
+          messagesPattern: join(__dirname, 'build/messages/**/*.json'),
+          aggregateOutputDir: join(__dirname, 'messages'),
+          aggregateFilename: 'en-us'
+        })
+        : undefined,
+
+      // Convert source (en-US) and translated strings to the format the app
+      // can consume, in the dist directory.
+      prod
+        ? new ReactIntlFlattenPlugin({
+          aggregatePattern: join(__dirname, 'messages/*.json'),
+          // dist/messages/[locale-id].json
+          langOutputDir: 'messages'
+        })
+        : undefined,
+
+      new ManifestPlugin()
+    ]),
+
+
+    resolve: {
+      /* Subdirectories to check while searching up tree for module
+       * Default is ['', '.js'] */
+      extensions: ['.js', '.jsx', '.json', '.css', '.less']
+    },
+
+    node: {
+      __dirname: true
+    },
+
+    /* Caching for incremental builds, only needed for dev mode */
+    cache: !prod,
+
+    /* fail on first error */
+    bail: prod,
+
+    devtool: prod ? 'source-map' : 'eval'
+  })
+}
+
